@@ -55,6 +55,7 @@ class SyncErrorFilter(
     // Timing state
     private var lastUpdateTimeUs: Long = 0
     private var measurementCount: Int = 0
+    private var retainDriftOnReset: Boolean = false
 
     /**
      * Whether enough measurements have been collected for reliable estimation.
@@ -75,6 +76,18 @@ class SyncErrorFilter(
         get() = drift
 
     /**
+     * Current drift variance estimate.
+     */
+    val driftVariance: Double
+        get() = p11
+
+    /**
+     * Current measurement count (number of observations applied).
+     */
+    val measurementSamples: Int
+        get() = measurementCount
+
+    /**
      * Estimated uncertainty (standard deviation) in microseconds.
      */
     val errorMicros: Long
@@ -92,6 +105,29 @@ class SyncErrorFilter(
         p11 = 1e-6
         lastUpdateTimeUs = 0
         measurementCount = 0
+        retainDriftOnReset = false
+    }
+
+    /**
+     * Reset only the measurement state while retaining the learned drift.
+     *
+     * This preserves the estimated CPU-to-DAC clock ratio across pauses or
+     * short stream interruptions. Offset is cleared so a new start time can
+     * be established on the next measurement.
+     */
+    fun resetMeasurementStateOnly(
+        currentTimeUs: Long,
+        driftVarianceInflation: Double = 4.0,
+        keepMeasurementCount: Boolean = true
+    ) {
+        offset = 0.0
+        p00 = Double.MAX_VALUE
+        p01 = 0.0
+        p10 = 0.0
+        p11 = (p11 * driftVarianceInflation).coerceAtLeast(1e-9)
+        lastUpdateTimeUs = currentTimeUs
+        measurementCount = if (keepMeasurementCount) MIN_MEASUREMENTS else 0
+        retainDriftOnReset = false
     }
 
     /**
@@ -110,7 +146,8 @@ class SyncErrorFilter(
                 offset = measDouble
                 p00 = measurementVariance
                 lastUpdateTimeUs = timeUs
-                measurementCount = 1
+                measurementCount = if (retainDriftOnReset) MIN_MEASUREMENTS else 1
+                retainDriftOnReset = false
             }
             1 -> {
                 // Second measurement - estimate initial drift

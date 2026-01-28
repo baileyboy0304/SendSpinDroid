@@ -64,6 +64,7 @@ object SendSpinProtocol {
         const val GROUP_UPDATE = "group/update"
         const val STREAM_START = "stream/start"
         const val STREAM_CLEAR = "stream/clear"
+        const val STREAM_END = "stream/end"
         const val CLIENT_SYNC_OFFSET = "client/sync_offset"
     }
 

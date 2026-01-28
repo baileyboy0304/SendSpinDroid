@@ -51,6 +51,7 @@ import com.sendspindroid.model.SyncStats
 import com.sendspindroid.sendspin.SendSpinClient
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.SyncAudioPlayerCallback
+import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
 import com.sendspindroid.sendspin.decoder.AudioDecoder
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
@@ -103,6 +104,7 @@ class PlaybackService : MediaLibraryService() {
     private var syncAudioPlayer: SyncAudioPlayer? = null
     private var audioDecoder: AudioDecoder? = null
     private var currentCodec: String = "pcm"  // Track current stream codec for stats
+    private var activeStreamConfig: StreamConfig? = null
 
     // Handler for posting callbacks to main thread
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -685,23 +687,40 @@ class PlaybackService : MediaLibraryService() {
                                 sendSpinClient?.play()
                                 // Don't clear buffer or pause - keep playing from existing buffer
                             } else {
-                                // Stop: "reset position to beginning" - clear buffer
-                                // Server genuinely wants to stop - honor it
-                                Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
-                                syncAudioPlayer?.clearBuffer()
-                                syncAudioPlayer?.pause()
+                                // Stop: server wants playback halted. Preserve sync state across resume.
+                                val player = syncAudioPlayer
+                                Log.d(
+                                    TAG,
+                                    "Playback stopped - clearing audio buffer and releasing playback locks " +
+                                            "(playerState=${player?.getPlaybackState()}, drift=${player?.getSyncErrorDrift()}, " +
+                                            "calCount=${player?.getDacCalibrationCount()})"
+                                )
+                                syncAudioPlayer?.clearQueuedAudioPreservingSyncState()
+                                syncAudioPlayer?.pauseKeepingClockRunning()
                                 releasePlaybackLocks()
                             }
                         }
                         PlaybackStateType.PAUSED -> {
                             // Pause: "maintains current position for later resumption" - keep buffer
-                            Log.d(TAG, "Playback paused - pausing audio (keeping buffer)")
-                            syncAudioPlayer?.pause()
+                            val player = syncAudioPlayer
+                            Log.d(
+                                TAG,
+                                "Playback paused - pausing audio (keeping buffer) " +
+                                        "(playerState=${player?.getPlaybackState()}, drift=${player?.getSyncErrorDrift()}, " +
+                                        "calCount=${player?.getDacCalibrationCount()})"
+                            )
+                            syncAudioPlayer?.pauseKeepingClockRunning()
                             releasePlaybackLocks()
                         }
                         PlaybackStateType.PLAYING -> {
                             // Playing: resume playback if paused
-                            Log.d(TAG, "Playback playing - resuming audio and acquiring playback locks")
+                            val player = syncAudioPlayer
+                            Log.d(
+                                TAG,
+                                "Playback playing - resuming audio and acquiring playback locks " +
+                                        "(playerState=${player?.getPlaybackState()}, drift=${player?.getSyncErrorDrift()}, " +
+                                        "calCount=${player?.getDacCalibrationCount()})"
+                            )
                             syncAudioPlayer?.resume()
                             sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
                             acquirePlaybackLocks()
@@ -816,9 +835,17 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Stream started: codec=$codec, rate=$sampleRate, channels=$channels, bits=$bitDepth, header=${codecHeader?.size ?: 0} bytes")
                 currentCodec = codec
+                val incomingConfig = StreamConfig(codec, sampleRate, channels, bitDepth, codecHeader)
+                val reusePlayer = syncAudioPlayer != null && activeStreamConfig == incomingConfig
 
-                // Stop existing player if any
-                syncAudioPlayer?.release()
+                if (reusePlayer) {
+                    Log.i(TAG, "Stream config unchanged - reusing SyncAudioPlayer and retaining sync state")
+                    syncAudioPlayer?.clearQueuedAudioPreservingSyncState()
+                } else {
+                    // Stop existing player if any (format change or first stream)
+                    syncAudioPlayer?.release()
+                    syncAudioPlayer = null
+                }
 
                 // Release existing decoder and create new one for this stream
                 audioDecoder?.release()
@@ -849,18 +876,21 @@ class PlaybackService : MediaLibraryService() {
                 startForegroundServiceWithNotification()
 
                 // Create and start the audio player
-                syncAudioPlayer = SyncAudioPlayer(
-                    timeFilter = timeFilter,
-                    sampleRate = sampleRate,
-                    channels = channels,
-                    bitDepth = bitDepth
-                ).apply {
-                    // Set callback to update SendSpinPlayer when playback state changes
-                    setStateCallback(SyncAudioPlayerStateCallback())
-                    initialize()
-                    start()
+                if (syncAudioPlayer == null) {
+                    syncAudioPlayer = SyncAudioPlayer(
+                        timeFilter = timeFilter,
+                        sampleRate = sampleRate,
+                        channels = channels,
+                        bitDepth = bitDepth
+                    ).apply {
+                        // Set callback to update SendSpinPlayer when playback state changes
+                        setStateCallback(SyncAudioPlayerStateCallback())
+                        initialize()
+                        start()
+                    }
                 }
                 sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
+                activeStreamConfig = incomingConfig
 
                 Log.i(TAG, "SyncAudioPlayer started: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit")
             }
@@ -1359,7 +1389,7 @@ class PlaybackService : MediaLibraryService() {
     private fun isActivelyPlaying(): Boolean {
         val state = syncAudioPlayer?.getPlaybackState()
         return state == com.sendspindroid.sendspin.PlaybackState.PLAYING ||
-               state == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
+                state == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
     }
 
     /**
@@ -1980,8 +2010,8 @@ class PlaybackService : MediaLibraryService() {
                     .build()
             }
             mediaId == MEDIA_ID_DISCOVERED ||
-            mediaId == MEDIA_ID_RECENT ||
-            mediaId == MEDIA_ID_MANUAL -> {
+                    mediaId == MEDIA_ID_RECENT ||
+                    mediaId == MEDIA_ID_MANUAL -> {
                 getRootChildren().find { it.mediaId == mediaId }
             }
             mediaId.startsWith(MEDIA_ID_SERVER_PREFIX) -> {
@@ -2016,7 +2046,7 @@ class PlaybackService : MediaLibraryService() {
         // Check if SyncAudioPlayer is actively playing
         val audioPlayerState = syncAudioPlayer?.getPlaybackState()
         val isPlaying = audioPlayerState == com.sendspindroid.sendspin.PlaybackState.PLAYING ||
-                        audioPlayerState == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
+                audioPlayerState == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
 
         Log.d(TAG, "onTaskRemoved (playing=$isPlaying, state=$audioPlayerState)")
 

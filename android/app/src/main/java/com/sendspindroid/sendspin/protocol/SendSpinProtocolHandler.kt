@@ -272,6 +272,9 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.GROUP_UPDATE -> handleGroupUpdate(payload)
                 SendSpinProtocol.MessageType.STREAM_START -> handleStreamStart(payload)
                 SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear()
+                SendSpinProtocol.MessageType.STREAM_END -> {
+                    Log.i(tag, "Received stream/end: payload=${payload?.toString() ?: "null"}")
+                }
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
                 else -> Log.d(tag, "Unhandled message type: $type")
             }

@@ -223,6 +223,8 @@ class SyncAudioPlayer(
 
         // Sync error update interval
         private const val SYNC_ERROR_UPDATE_INTERVAL = 5  // Update every N chunks
+        private const val SYNC_DEBUG_LOG_INTERVAL = 20    // Log every N sync updates
+        private const val SILENCE_FRAMES_PER_WRITE = 240  // ~5ms at 48kHz
 
         // Start gating configuration (from Python reference)
         private const val MIN_BUFFER_BEFORE_START_MS = 200  // Wait for 200ms buffer before scheduling
@@ -284,6 +286,7 @@ class SyncAudioPlayer(
     private var audioTrack: AudioTrack? = null
     private val isPlaying = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
+    private val keepClockRunningOnPause = AtomicBoolean(false)
     private var pausedAtUs: Long = 0L  // Timestamp when pause() was called, for long-pause detection
 
     // Playback state machine (from Python reference)
@@ -310,6 +313,9 @@ class SyncAudioPlayer(
     // Sync error tracking
     private val audioTimestamp = AudioTimestamp()  // Reusable timestamp object
     private var syncUpdateCounter = 0  // Counter for update interval
+    private var syncDebugCounter = 0
+    private var syncMissingCalCounter = 0
+    private val LARGE_SYNC_ERROR_LOG_THRESHOLD_US = 100_000L
     private var totalFramesWritten = 0L  // Total frames written to AudioTrack
 
     // Playback position tracking (in server timeline)
@@ -380,6 +386,16 @@ class SyncAudioPlayer(
 
     // Microseconds per sample frame
     private val microsPerSample = 1_000_000.0 / sampleRate
+    private val silenceBuffer = ByteArray(bytesPerFrame * SILENCE_FRAMES_PER_WRITE)
+
+    private fun logSyncState(prefix: String) {
+        Log.d(
+            TAG,
+            "$prefix state=$playbackState paused=${isPaused.get()} gen=$streamGeneration " +
+                    "syncErrorUs=$syncErrorUs drift=${syncErrorFilter.driftValue} " +
+                    "driftVar=${syncErrorFilter.driftVariance} calCount=${dacLoopCalibrations.size}"
+        )
+    }
 
     /**
      * Initialize the audio player with the specified format.
@@ -494,7 +510,6 @@ class SyncAudioPlayer(
 
             isPlaying.set(true)
             isPaused.set(false)
-            track.play()
 
             // Start the playback loop
             startPlaybackLoop()
@@ -509,6 +524,7 @@ class SyncAudioPlayer(
     fun pause() {
         stateLock.withLock {
             isPaused.set(true)
+            keepClockRunningOnPause.set(false)
             pausedAtUs = System.nanoTime() / 1000
             audioTrack?.pause()
             Log.d(TAG, "Playback paused")
@@ -516,16 +532,22 @@ class SyncAudioPlayer(
     }
 
     /**
+     * Pause playback while keeping the AudioTrack clock running by outputting silence.
+     */
+    fun pauseKeepingClockRunning() {
+        stateLock.withLock {
+            isPaused.set(true)
+            keepClockRunningOnPause.set(true)
+            pausedAtUs = System.nanoTime() / 1000
+            audioTrack?.play()
+            Log.d(TAG, "Playback paused (keeping clock running with silence)")
+        }
+    }
+
+    /**
      * Resume playback.
      *
-     * Resets sync state that becomes stale during pause:
-     * - DAC calibrations (System.nanoTime() continues advancing during pause)
-     * - Sync error filter (pre-pause error is no longer relevant)
-     * - Correction schedule (start fresh)
-     * - Grace period (allow sync to stabilize after resume)
-     *
-     * For long pauses (>5 seconds), clears the buffer and reinitializes
-     * since buffered chunks will be too stale.
+     * Preserves sync state across pause/resume cycles to avoid re-lock delays.
      */
     fun resume() {
         stateLock.withLock {
@@ -536,39 +558,13 @@ class SyncAudioPlayer(
 
             val nowUs = System.nanoTime() / 1000
             val pauseDurationUs = nowUs - pausedAtUs
-            val LONG_PAUSE_THRESHOLD_US = 5_000_000L  // 5 seconds
 
-            if (pauseDurationUs > LONG_PAUSE_THRESHOLD_US) {
-                Log.d(TAG, "Long pause detected (${pauseDurationUs / 1000}ms) - clearing stale buffer")
-                // Clear buffer and let it refill from server
-                chunkQueue.clear()
-                totalQueuedSamples.set(0)
-                setPlaybackState(PlaybackState.INITIALIZING)
-                expectedNextTimestampUs = null
-            }
-
-            // Clear stale DAC calibrations - they become invalid during pause
-            // because System.nanoTime() continues advancing
-            clearDacCalibrations()
-
-            // Reset sync error filter - pre-pause error is no longer relevant
-            syncErrorFilter.reset()
-            syncErrorUs = 0L
-
-            // Reset correction schedule - start fresh
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            framesUntilNextInsert = 0
-            framesUntilNextDrop = 0
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
-
-            // Reset grace period to allow sync to stabilize after resume
-            playingStateEnteredAtUs = nowUs
+            logSyncState("resume() preserving sync: pause=${pauseDurationUs / 1000}ms")
 
             isPaused.set(false)
+            keepClockRunningOnPause.set(false)
             audioTrack?.play()
-            Log.d(TAG, "Playback resumed after ${pauseDurationUs / 1000}ms pause - sync state reset")
+            logSyncState("resume() after resume: pause=${pauseDurationUs / 1000}ms")
         }
     }
 
@@ -697,6 +693,7 @@ class SyncAudioPlayer(
             synchronized(pendingChunks) {
                 pendingChunks.clear()
             }
+            clearDacCalibrations()
             stateCallback = null
 
             Log.i(TAG, "Released")
@@ -716,6 +713,7 @@ class SyncAudioPlayer(
         }
 
         stateLock.withLock {
+            logSyncState("clearBuffer() before reset")
             streamGeneration++
 
             // Reset paused state - we're starting a fresh stream (e.g., after seek)
@@ -742,9 +740,6 @@ class SyncAudioPlayer(
                         track.pause()
                     }
                     track.flush()
-                    if (wasPlaying) {
-                        track.play()
-                    }
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "Failed to flush AudioTrack during clearBuffer", e)
                 }
@@ -763,12 +758,34 @@ class SyncAudioPlayer(
             totalFramesWritten = 0L
             serverTimelineCursor = 0L
             playbackStartTimeUs = 0L
-            startTimeCalibrated = false
+            startTimeCalibrated = dacLoopCalibrations.isNotEmpty()
             samplesReadSinceStart = 0L
             syncErrorUs = 0L
-            syncErrorFilter.reset()
-            clearDacCalibrations()  // Clear DAC calibration history
+            syncErrorFilter.resetMeasurementStateOnly(System.nanoTime() / 1000)
             playingStateEnteredAtUs = 0L  // Reset grace period
+
+            // If we retained DAC calibrations, rebase sync state to current playback position
+            // to avoid large transient errors after a soft reset.
+            val trackForRebase = audioTrack
+            if (trackForRebase != null && dacLoopCalibrations.isNotEmpty()) {
+                val gotTimestamp = trackForRebase.getTimestamp(audioTimestamp)
+                if (gotTimestamp) {
+                    val dacTimeMicros = audioTimestamp.nanoTime / 1000
+                    val framePosition = audioTimestamp.framePosition
+                    val loopAtDacUs = estimateLoopTimeForDacTime(dacTimeMicros)
+                    if (loopAtDacUs != 0L) {
+                        val playbackPositionServerUs = computeServerTime(loopAtDacUs)
+                        totalFramesWritten = framePosition
+                        serverTimelineCursor = playbackPositionServerUs
+                        playbackStartTimeUs = loopAtDacUs - ((framePosition * 1_000_000L) / sampleRate)
+                        startTimeCalibrated = true
+                        Log.d(
+                            TAG,
+                            "Rebased sync state: framePos=$framePosition serverUs=${playbackPositionServerUs/1000}ms"
+                        )
+                    }
+                }
+            }
 
             // Reset sample insert/drop correction state
             insertEveryNFrames = 0
@@ -786,7 +803,110 @@ class SyncAudioPlayer(
             // Reset gap/overlap tracking
             expectedNextTimestampUs = null
 
-            Log.d(TAG, "Buffer cleared, generation=$streamGeneration, state=$playbackState")
+            logSyncState("clearBuffer() after reset")
+        }
+    }
+
+    /**
+     * Clear queued audio while preserving learned sync state (drift/DAC calibration).
+     *
+     * Intended for pause/stop cycles where the stream restarts but the hardware
+     * timing relationship remains valid.
+     */
+    fun clearQueuedAudioPreservingSyncState() {
+        if (isReleased.get()) {
+            Log.w(TAG, "Cannot clear queued audio - player has been released")
+            return
+        }
+
+        stateLock.withLock {
+            logSyncState("clearQueuedAudioPreservingSyncState() before")
+            streamGeneration++
+
+            // Clear the chunk queue (thread-safe operation)
+            chunkQueue.clear()
+            totalQueuedSamples.set(0)
+
+            synchronized(pendingChunks) {
+                pendingChunks.clear()
+            }
+
+            val track = audioTrack
+            if (track != null) {
+                try {
+                    val wasPlaying = isPlaying.get()
+                    if (wasPlaying) {
+                        track.pause()
+                    }
+                    track.flush()
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Failed to flush AudioTrack during clearQueuedAudioPreservingSyncState", e)
+                }
+            }
+
+            val trackForRebase = audioTrack
+            if (trackForRebase != null) {
+                val gotTimestamp = trackForRebase.getTimestamp(audioTimestamp)
+                val loopNowUs = System.nanoTime() / 1000
+                if (gotTimestamp) {
+                    val dacTimeMicros = audioTimestamp.nanoTime / 1000
+                    val framePosition = audioTimestamp.framePosition
+                    val loopAtDacUs = estimateLoopTimeForDacTime(dacTimeMicros)
+                    if (loopAtDacUs != 0L) {
+                        val playbackPositionServerUs = computeServerTime(loopAtDacUs)
+                        totalFramesWritten = framePosition
+                        samplesReadSinceStart = framePosition
+                        serverTimelineCursor = playbackPositionServerUs
+                        playbackStartTimeUs = loopAtDacUs - ((framePosition * 1_000_000L) / sampleRate)
+                        startTimeCalibrated = true
+                        Log.d(
+                            TAG,
+                            "Rebased queued-audio state: framePos=$framePosition " +
+                                    "serverUs=${playbackPositionServerUs / 1000}ms"
+                        )
+                    } else {
+                        val framePosition = trackForRebase.playbackHeadPosition.toLong()
+                        totalFramesWritten = framePosition
+                        samplesReadSinceStart = framePosition
+                        serverTimelineCursor = computeServerTime(loopNowUs)
+                        playbackStartTimeUs = loopNowUs - ((framePosition * 1_000_000L) / sampleRate)
+                        startTimeCalibrated = true
+                        Log.d(
+                            TAG,
+                            "Rebased queued-audio state without DAC mapping: framePos=$framePosition " +
+                                    "serverUs=${serverTimelineCursor / 1000}ms"
+                        )
+                    }
+                } else {
+                    val framePosition = trackForRebase.playbackHeadPosition.toLong()
+                    totalFramesWritten = framePosition
+                    samplesReadSinceStart = framePosition
+                    serverTimelineCursor = computeServerTime(loopNowUs)
+                    playbackStartTimeUs = loopNowUs - ((framePosition * 1_000_000L) / sampleRate)
+                    startTimeCalibrated = true
+                    Log.d(
+                        TAG,
+                        "Rebased queued-audio state without timestamp: framePos=$framePosition " +
+                                "serverUs=${serverTimelineCursor / 1000}ms"
+                    )
+                }
+            }
+
+            lastChunkServerTime = 0L
+            expectedNextTimestampUs = null
+            scheduledStartLoopTimeUs = null
+            firstServerTimestampUs = null
+
+            // Reset correction schedule only (retain sync filters/calibration)
+            insertEveryNFrames = 0
+            dropEveryNFrames = 0
+            framesUntilNextInsert = 0
+            framesUntilNextDrop = 0
+            crossfadeState = CrossfadeState.IDLE
+            crossfadeProgress = 0
+
+            setPlaybackState(PlaybackState.INITIALIZING)
+            logSyncState("clearQueuedAudioPreservingSyncState() after")
         }
     }
 
@@ -1081,13 +1201,32 @@ class SyncAudioPlayer(
             }
             else -> {
                 // Within tolerance - start playing
+                // Flush maintenance silence so playback starts with only new audio.
+                val track = audioTrack
+                if (track != null) {
+                    try {
+                        track.pause()
+                        track.flush()
+                        val framePosition = track.playbackHeadPosition.toLong()
+                        totalFramesWritten = framePosition
+                        samplesReadSinceStart = framePosition
+                    } catch (e: IllegalStateException) {
+                        Log.w(TAG, "Failed to flush AudioTrack during start gating", e)
+                    }
+                }
                 // Set initial playbackStartTimeUs, will be calibrated from first AudioTimestamp
                 val actualStartTime = System.nanoTime() / 1000
                 playbackStartTimeUs = actualStartTime
                 startTimeCalibrated = false
-                samplesReadSinceStart = 0L
+                if (track == null) {
+                    samplesReadSinceStart = 0L
+                }
                 setPlaybackState(PlaybackState.PLAYING)
-                Log.i(TAG, "Start gating complete: delta=${deltaUs/1000}ms, actualStartTime=${actualStartTime/1000}ms, now PLAYING")
+                Log.i(
+                    TAG,
+                    "Start gating complete: delta=${deltaUs/1000}ms, actualStartTime=${actualStartTime/1000}ms, " +
+                            "now PLAYING (flushed silence)"
+                )
                 return false  // Ready to play
             }
         }
@@ -1119,6 +1258,7 @@ class SyncAudioPlayer(
 
         try {
             Log.w(TAG, "Triggering reanchor: clearing buffers and resetting state")
+            logSyncState("reanchor() before reset")
 
             lastReanchorTimeUs = nowMicros
             setPlaybackState(PlaybackState.REANCHORING)
@@ -1133,7 +1273,6 @@ class SyncAudioPlayer(
                 try {
                     track.pause()
                     track.flush()
-                    track.play()
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "Failed to flush AudioTrack during reanchor", e)
                 }
@@ -1158,14 +1297,14 @@ class SyncAudioPlayer(
             startTimeCalibrated = false
             samplesReadSinceStart = 0L
             syncErrorUs = 0L
-            syncErrorFilter.reset()
-            clearDacCalibrations()  // Clear DAC calibration history
+            syncErrorFilter.resetMeasurementStateOnly(nowMicros)
             playingStateEnteredAtUs = 0L  // Reset grace period
 
             // Transition to INITIALIZING to wait for new chunks
             setPlaybackState(PlaybackState.INITIALIZING)
             syncCorrections++
             reanchorCount++
+            logSyncState("reanchor() after reset")
 
             return true
         } finally {
@@ -1190,7 +1329,12 @@ class SyncAudioPlayer(
 
             while (isActive && isPlaying.get()) {
                 if (isPaused.get()) {
-                    delay(STATE_POLL_DELAY_MS)
+                    val track = audioTrack
+                    if (track != null && keepClockRunningOnPause.get()) {
+                        writeSilence(track)
+                    } else {
+                        delay(STATE_POLL_DELAY_MS)
+                    }
                     continue
                 }
 
@@ -1321,6 +1465,25 @@ class SyncAudioPlayer(
             }
 
             Log.d(TAG, "Playback loop ended")
+        }
+    }
+
+    private fun writeSilence(track: AudioTrack) {
+        val written = track.write(silenceBuffer, 0, silenceBuffer.size)
+        if (written <= 0) {
+            return
+        }
+
+        val framesWritten = written / bytesPerFrame
+        totalFramesWritten += framesWritten
+        samplesReadSinceStart += framesWritten
+
+        val loopNowUs = System.nanoTime() / 1000
+        val chunkDurationUs = (framesWritten * 1_000_000L) / sampleRate
+        serverTimelineCursor = computeServerTime(loopNowUs) + chunkDurationUs
+
+        if (playbackStartTimeUs == 0L) {
+            playbackStartTimeUs = loopNowUs - ((samplesReadSinceStart * 1_000_000L) / sampleRate)
         }
     }
 
@@ -1546,6 +1709,16 @@ class SyncAudioPlayer(
         // Update frame tracking
         val framesWritten = written / bytesPerFrame
         totalFramesWritten += framesWritten
+
+        if (track.playState != AudioTrack.PLAYSTATE_PLAYING &&
+            totalFramesWritten > track.playbackHeadPosition
+        ) {
+            try {
+                track.play()
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "Failed to start AudioTrack after priming", e)
+            }
+        }
 
         // Update server timeline cursor - where we've fed audio up to
         val chunkDurationMicros = (chunk.sampleCount * 1_000_000L) / sampleRate
@@ -1842,12 +2015,21 @@ class SyncAudioPlayer(
             }
 
             // Store DAC calibration pair for time conversion
+            val hadCalibrations = dacLoopCalibrations.isNotEmpty()
             storeDacCalibration(dacTimeMicros, loopTimeUs)
 
             // Mark as calibrated after first successful timestamp
             if (!startTimeCalibrated) {
                 startTimeCalibrated = true
-                Log.i(TAG, "DAC calibration started: framePos=$framePosition, dacTime=${dacTimeMicros/1000}ms")
+                if (!hadCalibrations) {
+                    Log.i(TAG, "DAC calibration started: framePos=$framePosition, dacTime=${dacTimeMicros/1000}ms")
+                } else {
+                    Log.i(
+                        TAG,
+                        "DAC calibration resumed: framePos=$framePosition, dacTime=${dacTimeMicros/1000}ms, " +
+                                "calCount=${dacLoopCalibrations.size}"
+                    )
+                }
             }
 
             // ================================================================
@@ -1866,6 +2048,14 @@ class SyncAudioPlayer(
             val loopAtDacUs = estimateLoopTimeForDacTime(dacTimeMicros)
             if (loopAtDacUs == 0L) {
                 // Not enough calibrations yet
+                syncMissingCalCounter++
+                if (syncMissingCalCounter % SYNC_DEBUG_LOG_INTERVAL == 0) {
+                    Log.d(
+                        TAG,
+                        "Sync debug: insufficient DAC calibrations " +
+                                "(calCount=${dacLoopCalibrations.size}, framePos=$framePosition)"
+                    )
+                }
                 return
             }
 
@@ -1891,6 +2081,31 @@ class SyncAudioPlayer(
 
             // Apply 2D Kalman filter smoothing (tracks offset + drift)
             syncErrorFilter.update(rawSyncError, loopTimeUs)
+            syncDebugCounter++
+            if (syncDebugCounter >= SYNC_DEBUG_LOG_INTERVAL) {
+                syncDebugCounter = 0
+                Log.d(
+                    TAG,
+                    "Sync debug: rawErrorUs=$rawSyncError filteredOffsetUs=${syncErrorFilter.offsetMicros} " +
+                            "drift=${syncErrorFilter.driftValue} driftVar=${syncErrorFilter.driftVariance} " +
+                            "meas=${syncErrorFilter.measurementSamples} calCount=${dacLoopCalibrations.size} " +
+                            "framePos=$framePosition readCursorUs=$readCursorServerUs serverCursorUs=$serverTimelineCursor " +
+                            "timeOffsetUs=${timeFilter.offsetMicros} timeDriftPpm=${timeFilter.driftPpm} " +
+                            "timeErrorUs=${timeFilter.errorMicros} timeMeas=${timeFilter.measurementCountValue}"
+                )
+            }
+            if (kotlin.math.abs(rawSyncError) >= LARGE_SYNC_ERROR_LOG_THRESHOLD_US) {
+                Log.w(
+                    TAG,
+                    "Sync debug: large error ${rawSyncError}us " +
+                            "playbackServerUs=$playbackPositionServerUs loopAtDacUs=$loopAtDacUs " +
+                            "totalFramesWritten=$totalFramesWritten framesInBuffer=$framesInBuffer " +
+                            "bufferedTimeUs=$bufferedTimeUs playbackStartUs=$playbackStartTimeUs " +
+                            "scheduledStartUs=$scheduledStartLoopTimeUs firstServerUs=$firstServerTimestampUs " +
+                            "expectedNextUs=$expectedNextTimestampUs calibrated=$startTimeCalibrated " +
+                            "paused=${isPaused.get()} state=$playbackState gen=$streamGeneration"
+                )
+            }
 
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update sync error", e)
