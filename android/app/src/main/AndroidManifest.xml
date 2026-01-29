@@ -130,6 +130,17 @@
             -->
         </activity>
 
+        <!-- DemoAppActivity: Minimal headless controller demo -->
+        <activity
+            android:name=".demo.DemoAppActivity"
+            android:exported="true"
+            android:label="@string/demo_title">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- SettingsActivity: User preferences screen
              - parentActivityName: Enable up navigation to MainActivity -->
         <activity

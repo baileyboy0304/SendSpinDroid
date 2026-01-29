@@ -284,4 +284,16 @@
     <string name="accessibility_username_input">Username input field</string>
     <string name="accessibility_password_input">Password input field</string>
     <string name="accessibility_auth_mode_tabs">Authentication mode selection: Login or Token</string>
+
+    <!-- Demo app -->
+    <string name="demo_title">SendSpin Headless Demo</string>
+    <string name="demo_status_initial">Status: not connected</string>
+    <string name="demo_status_ready">Status: controller ready</string>
+    <string name="demo_status_connecting">Status: connecting…</string>
+    <string name="demo_status_disconnected">Status: disconnected</string>
+    <string name="demo_status_error">Status: error</string>
+    <string name="demo_server_address_hint">Server address (host:port)</string>
+    <string name="demo_server_path_hint">WebSocket path (default /sendspin)</string>
+    <string name="demo_connect">Connect</string>
+    <string name="demo_disconnect">Disconnect</string>
 </resources>
