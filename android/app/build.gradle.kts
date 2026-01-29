@@ -144,6 +144,8 @@ android {
 
 
 dependencies {
+    implementation(project(":sendspin-core"))
+
     // AndroidX Core KTX - Kotlin extensions for Android framework APIs
     implementation("androidx.core:core-ktx:1.17.0")
 
@@ -161,6 +163,9 @@ dependencies {
 
     // Kotlin Coroutines for Android - Structured concurrency primitives
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    // LocalBroadcastManager - internal app broadcasts for settings changes
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.1.0")
 
     // OkHttp - HTTP client with WebSocket support
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

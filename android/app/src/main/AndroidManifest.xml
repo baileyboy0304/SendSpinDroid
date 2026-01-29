@@ -12,52 +12,6 @@
         All permissions below are "normal" level and granted automatically at install time.
     -->
 
-    <!-- INTERNET: Required for network communication with audio servers
-         Permission level: Normal (auto-granted)
-         Used by: WebSocket client, HTTP requests, audio streaming -->
-    <uses-permission android:name="android.permission.INTERNET" />
-
-    <!-- ACCESS_NETWORK_STATE: Query network connectivity status
-         Permission level: Normal (auto-granted)
-         Used by: Check if WiFi/cellular is available before attempting connection
-         Allows: Detect network type, check if connected to internet -->
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- ACCESS_WIFI_STATE: Query WiFi state and info
-         Permission level: Normal (auto-granted)
-         Used by: Get WiFi network details, check if connected to WiFi
-         Note: Does not allow toggling WiFi on/off -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-
-    <!-- CHANGE_WIFI_MULTICAST_STATE: Enable multicast packet reception
-         Permission level: Normal (auto-granted)
-         CRITICAL FOR: mDNS/Zeroconf server discovery
-         Used by: WifiManager.MulticastLock in MainActivity
-         Note: Multicast is disabled by default to save battery
-         Android filters multicast packets unless this lock is held -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-
-    <!-- FOREGROUND_SERVICE: Required for background playback service
-         Permission level: Normal (auto-granted)
-         Used by: Media playback service to continue playing when app is backgrounded -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!-- FOREGROUND_SERVICE_MEDIA_PLAYBACK: Specific foreground service type for media
-         Permission level: Normal (auto-granted)
-         Required on API 34+ for media playback foreground services
-         Used by: MediaSessionService for background audio playback -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-
-    <!-- POST_NOTIFICATIONS: Display playback notification (required on API 33+)
-         Permission level: Dangerous (requires runtime permission request on API 33+)
-         Used by: Display media playback controls in notification area -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- WAKE_LOCK: Prevent CPU sleep during playback
-         Permission level: Normal (auto-granted)
-         Used by: Keep audio playback running when screen is off -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-
     <!-- CAMERA: Required for QR code scanning (Remote ID input)
          Permission level: Dangerous (requires runtime permission request)
          Used by: QR scanner to scan Music Assistant Remote ID codes
@@ -140,41 +94,6 @@
                 android:name="android.support.PARENT_ACTIVITY"
                 android:value=".MainActivity" />
         </activity>
-
-        <!--
-            PlaybackService: Background audio playback service with Android Auto support
-            - foregroundServiceType: Required on API 29+ to specify service purpose
-            - exported: Must be true for MediaBrowserService to allow connections from
-              Android Auto, Google Assistant, Bluetooth, and other system media controllers
-            - Security: MediaSession handles authentication via session tokens;
-              the onConnect callback can validate caller packages if needed
-            - intent-filter: Declares this as a MediaLibraryService for system integration
-              and Android Auto browse tree support
-        -->
-        <service
-            android:name=".playback.PlaybackService"
-            android:foregroundServiceType="mediaPlayback"
-            android:exported="true">
-            <intent-filter>
-                <!-- MediaLibraryService action for Media3 integration (Android Auto browse tree) -->
-                <action android:name="androidx.media3.session.MediaLibraryService" />
-                <!-- Backward compatibility with older MediaBrowserService clients -->
-                <action android:name="android.media.browse.MediaBrowserService" />
-            </intent-filter>
-        </service>
-
-        <!--
-            MediaButtonReceiver: Handles media button events (headset, Bluetooth)
-            - Forwards media button intents to the MediaSessionService
-            - Required for proper media button handling on all Android versions
-        -->
-        <receiver
-            android:name="androidx.media3.session.MediaButtonReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
-            </intent-filter>
-        </receiver>
 
         <!--
             FileProvider: Secure file sharing for debug logs

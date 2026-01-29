@@ -5,6 +5,7 @@ plugins {
     // Android Gradle Plugin (AGP) - manages Android build process
     // Version 8.13.2 is current stable (Dec 2025), supports API 36
     id("com.android.application") version "9.0.0" apply false
+    id("com.android.library") version "9.0.0" apply false
 
     // Kotlin Android plugin - enables Kotlin compilation for Android
     // Version 2.1.0 is compatible with AGP 8.13.x
