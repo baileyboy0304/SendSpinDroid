@@ -33,8 +33,6 @@ class SyncOffsetPreference @JvmOverloads constructor(
         private const val MIN_OFFSET_MS = -5000
         private const val MAX_OFFSET_MS = 5000
 
-        const val ACTION_SYNC_OFFSET_CHANGED = "com.sendspindroid.ACTION_SYNC_OFFSET_CHANGED"
-        const val EXTRA_OFFSET_MS = "offset_ms"
     }
 
     private var currentValue: Int = 0
@@ -90,8 +88,8 @@ class SyncOffsetPreference @JvmOverloads constructor(
         UserSettings.setSyncOffsetMs(currentValue)
 
         // Broadcast to PlaybackService to apply immediately
-        val intent = Intent(ACTION_SYNC_OFFSET_CHANGED).apply {
-            putExtra(EXTRA_OFFSET_MS, currentValue)
+        val intent = Intent(SettingsBroadcasts.ACTION_SYNC_OFFSET_CHANGED).apply {
+            putExtra(SettingsBroadcasts.EXTRA_OFFSET_MS, currentValue)
         }
         LocalBroadcastManager.getInstance(context).sendBroadcast(intent)
 

@@ -43,8 +43,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         private const val DEBUG_STATS_UPDATE_INTERVAL_MS = 2000L
 
         // Broadcast action for debug logging toggle
-        const val ACTION_DEBUG_LOGGING_CHANGED = "com.sendspindroid.ACTION_DEBUG_LOGGING_CHANGED"
-        const val EXTRA_DEBUG_LOGGING_ENABLED = "debug_logging_enabled"
     }
 
     // Handler for periodic updates of debug log sample count
@@ -83,8 +81,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 }
 
                 // Broadcast to PlaybackService to start/stop logging loop
-                val intent = Intent(ACTION_DEBUG_LOGGING_CHANGED).apply {
-                    putExtra(EXTRA_DEBUG_LOGGING_ENABLED, enabled)
+                val intent = Intent(SettingsBroadcasts.ACTION_DEBUG_LOGGING_CHANGED).apply {
+                    putExtra(SettingsBroadcasts.EXTRA_DEBUG_LOGGING_ENABLED, enabled)
                 }
                 LocalBroadcastManager.getInstance(requireContext()).sendBroadcast(intent)
 

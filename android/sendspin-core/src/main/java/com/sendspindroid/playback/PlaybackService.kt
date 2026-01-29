@@ -40,10 +40,8 @@ import coil.request.SuccessResult
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import com.sendspindroid.MainActivity
 import com.sendspindroid.ServerRepository
-import com.sendspindroid.SettingsFragment
-import com.sendspindroid.SyncOffsetPreference
+import com.sendspindroid.SettingsBroadcasts
 import com.sendspindroid.debug.DebugLogger
 import com.sendspindroid.model.PlaybackState
 import com.sendspindroid.model.PlaybackStateType
@@ -110,7 +108,7 @@ class PlaybackService : MediaLibraryService() {
     // BroadcastReceiver for sync offset changes from settings
     private val syncOffsetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val offsetMs = intent.getIntExtra(SyncOffsetPreference.EXTRA_OFFSET_MS, 0)
+            val offsetMs = intent.getIntExtra(SettingsBroadcasts.EXTRA_OFFSET_MS, 0)
             sendSpinClient?.getTimeFilter()?.let { timeFilter ->
                 timeFilter.staticDelayMs = offsetMs.toDouble()
                 Log.i(TAG, "Applied sync offset from settings change: ${offsetMs}ms")
@@ -122,7 +120,7 @@ class PlaybackService : MediaLibraryService() {
     private val debugLoggingReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val enabled = intent.getBooleanExtra(
-                SettingsFragment.EXTRA_DEBUG_LOGGING_ENABLED, false
+                SettingsBroadcasts.EXTRA_DEBUG_LOGGING_ENABLED, false
             )
             Log.i(TAG, "Debug logging changed: $enabled")
 
@@ -342,13 +340,13 @@ class PlaybackService : MediaLibraryService() {
         // Register receiver for sync offset changes from settings
         LocalBroadcastManager.getInstance(this).registerReceiver(
             syncOffsetReceiver,
-            IntentFilter(SyncOffsetPreference.ACTION_SYNC_OFFSET_CHANGED)
+            IntentFilter(SettingsBroadcasts.ACTION_SYNC_OFFSET_CHANGED)
         )
 
         // Register receiver for debug logging toggle changes from settings
         LocalBroadcastManager.getInstance(this).registerReceiver(
             debugLoggingReceiver,
-            IntentFilter(SettingsFragment.ACTION_DEBUG_LOGGING_CHANGED)
+            IntentFilter(SettingsBroadcasts.ACTION_DEBUG_LOGGING_CHANGED)
         )
 
         // Initialize Coil ImageLoader for artwork fetching (skip in low memory mode)
@@ -1449,7 +1447,7 @@ class PlaybackService : MediaLibraryService() {
             val notification = NotificationCompat.Builder(this, NotificationHelper.CHANNEL_ID)
                 .setContentTitle("SendSpin")
                 .setContentText(contentText)
-                .setSmallIcon(com.sendspindroid.R.drawable.ic_launcher_foreground)
+                .setSmallIcon(com.sendspindroid.R.drawable.ic_notification)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -1516,20 +1514,22 @@ class PlaybackService : MediaLibraryService() {
 
         forwardingPlayer = MetadataForwardingPlayer(player)
 
-        // Create PendingIntent for notification tap - opens MainActivity
-        val sessionActivityIntent = Intent(this, MainActivity::class.java).apply {
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
-        val sessionActivityPendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            sessionActivityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val builder = MediaLibrarySession.Builder(this, forwardingPlayer!!, LibraryCallback())
 
-        mediaSession = MediaLibrarySession.Builder(this, forwardingPlayer!!, LibraryCallback())
-            .setSessionActivity(sessionActivityPendingIntent)
-            .build()
+        if (launchIntent != null) {
+            val sessionActivityPendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.setSessionActivity(sessionActivityPendingIntent)
+        }
+
+        mediaSession = builder.build()
 
         Log.d(TAG, "MediaLibrarySession initialized with browse tree support")
     }
